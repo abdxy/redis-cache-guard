@@ -1,61 +1,222 @@
-# cache-guard
+# Redis Cache Guard Module
 
-A Redis module for preventing **cache stampede** by providing simple, key-level cache management commands.
+A Redis module that implements intelligent cache management with graceful degradation to prevent cache stampedes and improve application performance.
 
 ## Overview
 
-**cache-guard** is a C-based Redis module that introduces two commands: `CACHE.SETSM` and `CACHE.GETSM`. These commands help manage cache entries and their expiration in a way that reduces the risk of cache stampede, ensuring that only one process regenerates a missing or expired cache entry at a time.
+Cache Guard is a Redis module that provides smart caching with a "grace period" mechanism. When cached data is near expiration, it allows serving stale data to subsequent clients while only one client regenerates the cache, preventing the thundering herd problem.
 
-## Why cache-guard?
+## Key Features
 
-In high-traffic systems, a cache miss can trigger many clients to simultaneously rebuild the same cache entry, overloading backend resources. **cache-guard** addresses this by providing atomic cache get/set operations with expiration, so only one client sees a true miss and others wait for the cache to be rebuilt.
+- **Grace Period Management**: Serve stale data during cache regeneration
+- **Stampede Prevention**: Only one client regenerates expired cache at a time
+- **Automatic Lock Management**: Built-in regeneration locks with expiration
+- **Simple API**: Easy-to-use GET/SET commands with expiration support
+
+## How It Works
+
+1. **Normal Operation**: Cache hits return fresh data immediately
+2. **Grace Period**: When cache is near expiration (within grace period):
+   - First client gets `null` and regenerates the cache
+   - Subsequent clients get stale data while regeneration happens
+3. **Cache Miss**: Returns `null` to trigger cache generation
+4. **Lock Management**: Automatic cleanup of regeneration locks
 
 ## Commands
 
-- **`CACHE.SETSM <key> <value> <expire>`**  
-  Sets the value for `<key>` with an expiration time (in milliseconds).  
-  - Returns `OK` on success.
-  - Example:  
-    ```sh
-    CACHE.SETSM my-key "some value" 60000
-    ```
+### `cache.guard.get <key> <grace_period_ms>`
 
-- **`CACHE.GETSM <key>`**  
-  Gets the value for `<key>`.  
-  - If the key exists and is not expired, returns the value.
-  - If the key is missing or expired, deletes the key and returns null, signaling the caller to regenerate the cache.
-  - Example:  
-    ```sh
-    CACHE.GETSM my-key
-    ```
+Retrieves a cached value with intelligent grace period handling.
 
-## How it works
+**Parameters:**
+- `key`: The cache key to retrieve
+- `grace_period_ms`: Time in milliseconds before expiration to start graceful degradation
 
-- When a cache entry expires, the first client to call `CACHE.GETSM` will receive a null response and is responsible for regenerating the cache.
-- Other clients will wait for the cache to be set again, preventing multiple simultaneous rebuilds.
-- The `CACHE.SETSM` command sets the cache value and its expiration.
+**Returns:**
+- Cached value if valid and not in grace period
+- Stale cached value if another client is regenerating
+- `null` if cache is missing or client should regenerate
+
+**Example:**
+```redis
+cache.guard.get user:123 5000
+```
+
+### `cache.guard.set <key> <value> <expire_ms>`
+
+Sets a cached value with expiration time.
+
+**Parameters:**
+- `key`: The cache key to set
+- `value`: The value to cache
+- `expire_ms`: Expiration time in milliseconds
+
+**Returns:**
+- `OK` on successful set
+
+**Example:**
+```redis
+cache.guard.set user:123 "user_data_json" 60000
+```
 
 ## Installation
 
-1. Build the module:
-   ```sh
-   make
-   ```
-2. Load it into Redis:
-   ```sh
-   redis-server --loadmodule /path/to/cache-guard.so
-   ```
+### Prerequisites
+- Redis 4.0+
+- GCC or compatible C compiler
+- Redis module development headers
 
-## Example Workflow
+### Building the Module
 
-1. On cache miss, call `CACHE.GETSM key`.
-2. If null is returned, regenerate the value and set it with `CACHE.SETSM key value expire`.
-3. If a value is returned, use it directly.
+```bash
+# Clone the repository
+git clone <repository-url>
+cd cache-redis
+
+# Compile the module
+gcc -fPIC -shared -o cacheguard.so cacheguard.c -I/path/to/redis/src
+
+# Or if you have redis-server installed with headers
+gcc -fPIC -shared -o cacheguard.so cacheguard.c
+```
+
+### Loading the Module
+
+```bash
+# Method 1: Load at Redis startup
+redis-server --loadmodule ./cacheguard.so
+
+# Method 2: Load dynamically
+redis-cli> MODULE LOAD /path/to/cacheguard.so
+```
+
+## Usage Examples
+
+### Basic Caching Pattern
+
+```python
+import redis
+
+r = redis.Redis()
+
+# Check cache
+result = r.execute_command('cache.guard.get', 'expensive_data', 5000)
+
+if result is None:
+    # Cache miss or in grace period - regenerate
+    expensive_data = compute_expensive_operation()
+    r.execute_command('cache.guard.set', 'expensive_data', expensive_data, 60000)
+    return expensive_data
+else:
+    # Cache hit - return cached data
+    return result
+```
+
+### Web Application Integration
+
+```python
+def get_user_profile(user_id):
+    cache_key = f"user_profile:{user_id}"
+    grace_period = 10000  # 10 seconds
+    
+    # Try to get from cache
+    cached_profile = redis_client.execute_command(
+        'cache.guard.get', cache_key, grace_period
+    )
+    
+    if cached_profile is None:
+        # Generate fresh data
+        profile = fetch_user_from_database(user_id)
+        
+        # Cache for 5 minutes
+        redis_client.execute_command(
+            'cache.guard.set', cache_key, 
+            json.dumps(profile), 300000
+        )
+        return profile
+    else:
+        # Return cached (possibly stale) data
+        return json.loads(cached_profile)
+```
+
+## Architecture Details
+
+### Grace Period Logic
+
+```
+Cache Lifetime: |-------- VALID --------|-- GRACE --|
+Time:          0                      TTL-Grace   TTL
+
+- VALID: Return cached value immediately
+- GRACE: First client regenerates, others get stale data
+- EXPIRED: All clients get null (cache miss)
+```
+
+### Lock Mechanism
+
+- Regeneration locks use the pattern: `{original_key}:regen_lock`
+- Locks expire automatically using the grace period duration
+- Automatic cleanup when new data is set
+- Prevents multiple concurrent regenerations
+
+### Memory Management
+
+- Uses Redis module automatic memory management
+- Efficient string operations with zero-copy where possible
+- Minimal memory overhead for lock keys
+
+## Configuration
+
+The module accepts the following parameters during load:
+
+```redis
+MODULE LOAD /path/to/cacheguard.so
+```
+
+Currently, no additional configuration parameters are supported.
+
+## Performance Considerations
+
+- **Cache Stampede Prevention**: Dramatically reduces database load during cache expiration
+- **Low Latency**: Stale data serving keeps response times consistent
+- **Memory Efficient**: Minimal overhead for lock management
+- **Thread Safe**: Fully compatible with Redis's single-threaded model
+
+## Error Handling
+
+The module returns appropriate Redis errors for:
+- Invalid argument counts
+- Invalid numeric parameters (negative grace periods, invalid expiration times)
+- Memory allocation failures
+
+## Monitoring
+
+Monitor the effectiveness of Cache Guard by tracking:
+- Cache hit rates
+- Regeneration lock creation frequency
+- Application response time consistency
+- Database load patterns
+
+## Contributing
+
+1. Fork the repository
+2. Create a feature branch
+3. Add tests for new functionality
+4. Submit a pull request
 
 ## License
 
-MIT License
+[Specify your license here]
+
+## Support
+
+For issues and questions:
+- Open an issue on GitHub
+- Check existing documentation
+- Review Redis module development guides
 
 ---
 
-Contributions and feedback are
+**Version**: 1.0  
+**Compatibility**: Redis 4.0+  
+**Module Name**: `cacheguard` 
