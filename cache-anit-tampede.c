@@ -18,21 +18,23 @@ static struct {
     long long default_grace_period;
     long long max_lock_duration;
 } module_config = {
-    .log_level = REDISMODULE_LOGLEVEL_NOTICE,
+    .log_level = 1,  // 0=debug, 1=notice, 2=warning, 3=error
     .default_grace_period = 5000,
     .max_lock_duration = 30000
 };
 
 // Logging macros
 #define LOG_DEBUG(ctx, fmt, ...) \
-    if (module_config.log_level <= REDISMODULE_LOGLEVEL_DEBUG) \
-        RedisModule_Log(ctx, "debug", "CacheGuard: " fmt, ##__VA_ARGS__)
+    if (module_config.log_level <= 0) \
+        RedisModule_Log(ctx, REDISMODULE_LOGLEVEL_DEBUG, "CacheGuard: " fmt, ##__VA_ARGS__)
 
 #define LOG_NOTICE(ctx, fmt, ...) \
-    RedisModule_Log(ctx, "notice", "CacheGuard: " fmt, ##__VA_ARGS__)
+    if (module_config.log_level <= 1) \
+        RedisModule_Log(ctx, REDISMODULE_LOGLEVEL_NOTICE, "CacheGuard: " fmt, ##__VA_ARGS__)
 
 #define LOG_WARNING(ctx, fmt, ...) \
-    RedisModule_Log(ctx, "warning", "CacheGuard: " fmt, ##__VA_ARGS__)
+    if (module_config.log_level <= 2) \
+        RedisModule_Log(ctx, REDISMODULE_LOGLEVEL_WARNING, "CacheGuard: " fmt, ##__VA_ARGS__)
 
 // Enhanced lock key generation with safety checks
 static RedisModuleString *CreateLockKey(RedisModuleCtx *ctx, RedisModuleString *key) {
