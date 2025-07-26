@@ -74,10 +74,10 @@ git clone <repository-url>
 cd cache-redis
 
 # Compile the module
-gcc -fPIC -shared -o cacheguard.so cacheguard.c -I/path/to/redis/src
+gcc -fPIC -shared -o cacheguard.so cache-anit-tampede.c -I/path/to/redis/src
 
 # Or if you have redis-server installed with headers
-gcc -fPIC -shared -o cacheguard.so cacheguard.c
+gcc -fPIC -shared -o cacheguard.so cache-anit-tampede.c
 ```
 
 ### Loading the Module
